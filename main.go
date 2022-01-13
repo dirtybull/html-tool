@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -19,7 +20,7 @@ func extractSelector(r io.Reader, selector string) ([]string, error) {
 
 	out := []string{}
 
-	sel, err := css.Compile(selector)
+	sel, err := css.Parse(selector)
 	if err != nil {
 		return out, err
 	}
@@ -67,7 +68,9 @@ func extractComments(r io.Reader) []string {
 	return out
 }
 
-func extractAttribs(r io.Reader, attribs []string) []string {
+func extractAttribs(tar *target, attribs []string) []string {
+	r := tar.r
+	location := tar.location
 	z := html.NewTokenizer(r)
 
 	out := []string{}
@@ -88,7 +91,29 @@ func extractAttribs(r io.Reader, attribs []string) []string {
 
 			for _, attrib := range attribs {
 				if attrib == a.Key {
-					out = append(out, a.Val)
+					nl := strings.ToLower(location)
+					if strings.HasPrefix(nl, "http:") || strings.HasPrefix(nl, "https:") && (attrib == "src" || attrib == "href") {
+						u, err := url.ParseRequestURI(location)
+						if err != nil {
+							out = append(out, a.Val)
+						}
+
+						if strings.HasPrefix(a.Val, "//") {
+							out = append(out, "https:"+a.Val)
+						} else if strings.HasPrefix(a.Val, "/") {
+							out = append(out, u.Scheme+"://"+u.Host+a.Val)
+						} else {
+							_, err := url.ParseRequestURI(a.Val)
+							if err != nil {
+								out = append(out, u.Scheme+"://"+u.Host+u.Path+a.Val)
+								continue
+							}
+
+							out = append(out, a.Val)
+						}
+					} else {
+						out = append(out, a.Val)
+					}
 				}
 			}
 		}
@@ -172,7 +197,7 @@ func main() {
 			case "tags":
 				vals = extractTags(t.r, args)
 			case "attribs":
-				vals = extractAttribs(t.r, args)
+				vals = extractAttribs(t, args)
 			case "comments":
 				vals = extractComments(t.r)
 			case "query":

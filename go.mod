@@ -1,4 +1,4 @@
-module dirtybull/html-tool
+module github.com/dirtybull/html-tool
 
 go 1.17
 

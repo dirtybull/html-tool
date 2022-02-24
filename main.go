@@ -152,15 +152,13 @@ func extractTags(r io.Reader, tags []string) []string {
 	return out
 }
 
-type target struct {
-	location string
-	r        io.ReadCloser
-}
-
 func main() {
 	// TODO: support quiet mode (no errors)
 	// TODO: option to output file or url as context
 	// TODO: add concurrency flag
+
+	var headers headerArgs
+	flag.Var(&headers, "H", "")
 
 	flag.Parse()
 
@@ -169,7 +167,7 @@ func main() {
 	if mode == "" {
 		fmt.Println("Accept URLs or filenames for HTML documents on stdin and extract parts of them.")
 		fmt.Println("")
-		fmt.Println("Usage: html-tool <mode> [<args>]")
+		fmt.Println("Usage: html-tool [-H \"header1:value1\" -H \"header2:value2\" ... ] <mode> [<args>]")
 		fmt.Println("")
 		fmt.Println("Modes:")
 		fmt.Println("	tags <tag-names>        Extract text contained in tags")
@@ -235,7 +233,23 @@ func main() {
 		// if it's a URL request it with gahttp
 		nl := strings.ToLower(location)
 		if strings.HasPrefix(nl, "http:") || strings.HasPrefix(nl, "https:") {
-			p.Get(location, func(req *http.Request, resp *http.Response, err error) {
+			req, err := http.NewRequest("GET", location, nil)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "failed to create request for: %s. Error: %s\n", location, err)
+				return
+			}
+
+			// add headers to the request
+			for _, h := range headers {
+				parts := strings.SplitN(h, ":", 2)
+
+				if len(parts) != 2 {
+					continue
+				}
+				req.Header.Set(parts[0], parts[1])
+			}
+
+			p.Do(req, func(req *http.Request, resp *http.Response, err error) {
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "failed to fetch URL: %s\n", err)
 				}
@@ -260,4 +274,20 @@ func main() {
 
 	close(targets)
 	wg.Wait()
+}
+
+type target struct {
+	location string
+	r        io.ReadCloser
+}
+
+type headerArgs []string
+
+func (h *headerArgs) Set(val string) error {
+	*h = append(*h, val)
+	return nil
+}
+
+func (h headerArgs) String() string {
+	return strings.Join(h, ", ")
 }

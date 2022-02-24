@@ -16,6 +16,137 @@ import (
 	"golang.org/x/net/html"
 )
 
+func main() {
+	// TODO: support quiet mode (no errors)
+	// TODO: option to output file or url as context
+	// TODO: add concurrency flag
+
+	var headers headerArgs
+	flag.Var(&headers, "H", "")
+
+	var concurrency int
+	flag.IntVar(&concurrency, "c", 40, "")
+
+	var delayMs int
+	flag.IntVar(&delayMs, "d", 100, "")
+
+	flag.Parse()
+
+	// TODO: check mode is valid
+	mode := flag.Arg(0)
+	if mode == "" {
+		fmt.Println("Accept URLs or filenames for HTML documents on stdin and extract parts of them.")
+		fmt.Println("")
+		fmt.Println("Usage: html-tool [-H \"header1:value1\" -H \"header2:value2\" ... ] [-c concurrency (default: 40)] [-d delay (default: 100 ms)] <mode> [<args>]")
+		fmt.Println("")
+		fmt.Println("Modes:")
+		fmt.Println("	tags <tag-names>        Extract text contained in tags")
+		fmt.Println("	attribs <attrib-names>  Extract attribute values")
+		fmt.Println("	comments                Extract comments")
+		fmt.Println("")
+		fmt.Println("Examples:")
+		fmt.Println("	cat urls.txt | html-tool tags title a strong")
+		fmt.Println("	find . -type f -name \"*.html\" | html-tool attribs src href")
+		fmt.Println("	cat urls.txt | html-tool comments")
+		return
+	}
+
+	args := flag.Args()[1:]
+
+	targets := make(chan *target)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		for t := range targets {
+			vals := []string{}
+
+			switch mode {
+			case "tags":
+				vals = extractTags(t.r, args)
+			case "attribs":
+				vals = extractAttribs(t, args)
+			case "comments":
+				vals = extractComments(t.r)
+			case "query":
+				var err error
+				vals, err = extractSelector(t.r, flag.Arg(1))
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "failed to parse CSS selector: %s\n", err)
+					break
+				}
+
+			default:
+				fmt.Fprintf(os.Stderr, "unsupported mode '%s'\n", mode)
+				break
+			}
+
+			for _, v := range vals {
+				fmt.Println(v)
+			}
+
+			// don't forget to close the reader when we're done with it!
+			t.r.Close()
+		}
+		wg.Done()
+	}()
+
+	p := gahttp.NewPipeline()
+	p.SetClient(gahttp.NewClient(gahttp.SkipVerify))
+	p.SetConcurrency(concurrency)
+	p.SetRateLimitMillis(delayMs)
+
+	sc := bufio.NewScanner(os.Stdin)
+	for sc.Scan() {
+		// location can be a filename or a URL
+		location := strings.TrimSpace(sc.Text())
+
+		// if it's a URL request it with gahttp
+		nl := strings.ToLower(location)
+		if strings.HasPrefix(nl, "http:") || strings.HasPrefix(nl, "https:") {
+			req, err := http.NewRequest("GET", location, nil)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "failed to create request for: %s. Error: %s\n", location, err)
+				return
+			}
+
+			// add headers to the request
+			for _, h := range headers {
+				parts := strings.SplitN(h, ":", 2)
+
+				if len(parts) != 2 {
+					continue
+				}
+				req.Header.Set(parts[0], parts[1])
+			}
+
+			p.Do(req, func(req *http.Request, resp *http.Response, err error) {
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "failed to fetch URL: %s\n", err)
+				}
+				if resp != nil && resp.Body != nil {
+					targets <- &target{req.URL.String(), resp.Body}
+				}
+			})
+			continue
+		}
+
+		// if it's a file just open it
+		f, err := os.Open(location)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to open file: %s\n", err)
+			continue
+		}
+
+		targets <- &target{location, f}
+	}
+	p.Done()
+	p.Wait()
+
+	close(targets)
+	wg.Wait()
+}
+
 func extractSelector(r io.Reader, selector string) ([]string, error) {
 
 	out := []string{}
@@ -150,130 +281,6 @@ func extractTags(r io.Reader, tags []string) []string {
 		}
 	}
 	return out
-}
-
-func main() {
-	// TODO: support quiet mode (no errors)
-	// TODO: option to output file or url as context
-	// TODO: add concurrency flag
-
-	var headers headerArgs
-	flag.Var(&headers, "H", "")
-
-	flag.Parse()
-
-	// TODO: check mode is valid
-	mode := flag.Arg(0)
-	if mode == "" {
-		fmt.Println("Accept URLs or filenames for HTML documents on stdin and extract parts of them.")
-		fmt.Println("")
-		fmt.Println("Usage: html-tool [-H \"header1:value1\" -H \"header2:value2\" ... ] <mode> [<args>]")
-		fmt.Println("")
-		fmt.Println("Modes:")
-		fmt.Println("	tags <tag-names>        Extract text contained in tags")
-		fmt.Println("	attribs <attrib-names>  Extract attribute values")
-		fmt.Println("	comments                Extract comments")
-		fmt.Println("")
-		fmt.Println("Examples:")
-		fmt.Println("	cat urls.txt | html-tool tags title a strong")
-		fmt.Println("	find . -type f -name \"*.html\" | html-tool attribs src href")
-		fmt.Println("	cat urls.txt | html-tool comments")
-		return
-	}
-
-	args := flag.Args()[1:]
-
-	targets := make(chan *target)
-
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		for t := range targets {
-			vals := []string{}
-
-			switch mode {
-			case "tags":
-				vals = extractTags(t.r, args)
-			case "attribs":
-				vals = extractAttribs(t, args)
-			case "comments":
-				vals = extractComments(t.r)
-			case "query":
-				var err error
-				vals, err = extractSelector(t.r, flag.Arg(1))
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "failed to parse CSS selector: %s\n", err)
-					break
-				}
-
-			default:
-				fmt.Fprintf(os.Stderr, "unsupported mode '%s'\n", mode)
-				break
-			}
-
-			for _, v := range vals {
-				fmt.Println(v)
-			}
-
-			// don't forget to close the reader when we're done with it!
-			t.r.Close()
-		}
-		wg.Done()
-	}()
-
-	p := gahttp.NewPipeline()
-	p.SetClient(gahttp.NewClient(gahttp.SkipVerify))
-	p.SetConcurrency(20)
-
-	sc := bufio.NewScanner(os.Stdin)
-	for sc.Scan() {
-		// location can be a filename or a URL
-		location := strings.TrimSpace(sc.Text())
-
-		// if it's a URL request it with gahttp
-		nl := strings.ToLower(location)
-		if strings.HasPrefix(nl, "http:") || strings.HasPrefix(nl, "https:") {
-			req, err := http.NewRequest("GET", location, nil)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "failed to create request for: %s. Error: %s\n", location, err)
-				return
-			}
-
-			// add headers to the request
-			for _, h := range headers {
-				parts := strings.SplitN(h, ":", 2)
-
-				if len(parts) != 2 {
-					continue
-				}
-				req.Header.Set(parts[0], parts[1])
-			}
-
-			p.Do(req, func(req *http.Request, resp *http.Response, err error) {
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "failed to fetch URL: %s\n", err)
-				}
-				if resp != nil && resp.Body != nil {
-					targets <- &target{req.URL.String(), resp.Body}
-				}
-			})
-			continue
-		}
-
-		// if it's a file just open it
-		f, err := os.Open(location)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "failed to open file: %s\n", err)
-			continue
-		}
-
-		targets <- &target{location, f}
-	}
-	p.Done()
-	p.Wait()
-
-	close(targets)
-	wg.Wait()
 }
 
 type target struct {
